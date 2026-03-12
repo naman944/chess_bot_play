@@ -1,7 +1,7 @@
 """
 RoboGambit 2025-26 — Game Runner
 Supports: Engine vs Engine | Human vs Engine | Human vs Human
-Import from game.py (submission file)
+submission file
 """
 
 import numpy as np
