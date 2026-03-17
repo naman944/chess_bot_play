@@ -22,6 +22,7 @@ Board coordinates:
 
 Move output format:  "<piece_id>:<source_cell>-><target_cell>"
   e.g.  "1:B3->B4"   (White Pawn moves from B3 to B4)
+  With promotion: "1:A5->A6=4"  (White Pawn promotes to White Queen)
 """
 
 import numpy as np
@@ -66,9 +67,6 @@ PIECE_VALUES = {
 # Column index → letter
 COL_TO_FILE = {0: 'A', 1: 'B', 2: 'C', 3: 'D', 4: 'E', 5: 'F'}
 FILE_TO_COL = {v: k for k, v in COL_TO_FILE.items()}
-
-# Promotion rules — only allowed to pieces already lost
-INITIAL_COUNTS = {'Q': 1, 'B': 2, 'N': 2}
 
 # ---------------------------------------------------------------------------
 # Piece-Square Tables (6x6) — tuned for 6x6 board
@@ -132,8 +130,6 @@ PST = {
 # Internal state — repetition tracking (module-level, no extra params needed)
 # ---------------------------------------------------------------------------
 
-# position_history: maps board bytes -> visit count
-# reset each game via reset_game_state()
 _position_history = {}
 _move_number      = 0
 _killer_moves     = [[None, None] for _ in range(20)]
@@ -193,27 +189,20 @@ def same_side(p1: int, p2: int) -> bool:
 
 # ---------------------------------------------------------------------------
 # Pawn Promotion Rule Logic
+# FIX: Promotion is now COMPULSORY and ALWAYS available (all 3 piece types).
+#      The old conditional logic that only allowed promotion if pieces were
+#      already lost has been removed.
 # ---------------------------------------------------------------------------
 
 def get_available_promotions(board: np.ndarray, playing_white: bool):
-    """Promotion only allowed to pieces already lost in the game."""
-    q_cnt, b_cnt, n_cnt = 0, 0, 0
-    for r in range(BOARD_SIZE):
-        for c in range(BOARD_SIZE):
-            p = board[r][c]
-            if playing_white:
-                if p == WHITE_QUEEN:    q_cnt += 1
-                elif p == WHITE_BISHOP: b_cnt += 1
-                elif p == WHITE_KNIGHT: n_cnt += 1
-            else:
-                if p == BLACK_QUEEN:    q_cnt += 1
-                elif p == BLACK_BISHOP: b_cnt += 1
-                elif p == BLACK_KNIGHT: n_cnt += 1
-    promos = []
-    if q_cnt < INITIAL_COUNTS['Q']: promos.append(WHITE_QUEEN  if playing_white else BLACK_QUEEN)
-    if b_cnt < INITIAL_COUNTS['B']: promos.append(WHITE_BISHOP if playing_white else BLACK_BISHOP)
-    if n_cnt < INITIAL_COUNTS['N']: promos.append(WHITE_KNIGHT if playing_white else BLACK_KNIGHT)
-    return promos
+    """
+    Promotion is COMPULSORY whenever a pawn reaches the last rank.
+    Always returns Queen, Bishop, and Knight as promotion choices.
+    """
+    if playing_white:
+        return [WHITE_QUEEN, WHITE_BISHOP, WHITE_KNIGHT]
+    else:
+        return [BLACK_QUEEN, BLACK_BISHOP, BLACK_KNIGHT]
 
 # ---------------------------------------------------------------------------
 # Move generation
@@ -224,6 +213,7 @@ def get_pawn_moves(board: np.ndarray, row: int, col: int, piece: int):
     White Pawns move upward (increasing row index).
     Black Pawns move downward (decreasing row index).
     Captures are diagonal-forward.
+    Promotion is compulsory on reaching the last rank.
     """
     moves = []
     is_w      = is_white(piece)
@@ -234,6 +224,7 @@ def get_pawn_moves(board: np.ndarray, row: int, col: int, piece: int):
     nr = row + direction
     if in_bounds(nr, col) and board[nr][col] == EMPTY:
         if nr == last_rank:
+            # COMPULSORY promotion — must promote, no plain move allowed
             for promo in get_available_promotions(board, is_w):
                 moves.append((piece, row, col, nr, col, promo))
         else:
@@ -246,6 +237,7 @@ def get_pawn_moves(board: np.ndarray, row: int, col: int, piece: int):
             target = board[nr][nc]
             if target != EMPTY and not same_side(piece, target):
                 if nr == last_rank:
+                    # COMPULSORY promotion on capture too
                     for promo in get_available_promotions(board, is_w):
                         moves.append((piece, row, col, nr, nc, promo))
                 else:
@@ -560,14 +552,24 @@ def _order_moves(board: np.ndarray, moves: list, depth: int = 0) -> list:
 
 # ---------------------------------------------------------------------------
 # Format move string
+# FIX: Now accepts optional promo_piece and appends =<piece_id> when present.
 # ---------------------------------------------------------------------------
 
 def format_move(piece: int, src_row: int, src_col: int,
-                dst_row: int, dst_col: int) -> str:
-    """Return move in required format: '<piece_id>:<source_cell>-><target_cell>'."""
+                dst_row: int, dst_col: int,
+                promo_piece: int = None) -> str:
+    """
+    Return move in required format:
+      Normal move : '<piece_id>:<source_cell>-><target_cell>'
+      Promotion   : '<piece_id>:<source_cell>-><target_cell>=<promo_piece_id>'
+    e.g. '1:A5->A6=4'  (White Pawn promotes to White Queen)
+    """
     src_cell = idx_to_cell(src_row, src_col)
     dst_cell = idx_to_cell(dst_row, dst_col)
-    return f"{piece}:{src_cell}->{dst_cell}"
+    base = f"{piece}:{src_cell}->{dst_cell}"
+    if promo_piece is not None:
+        base += f"={promo_piece}"
+    return base
 
 # ---------------------------------------------------------------------------
 # Quiescence search — prevents horizon effect
@@ -637,7 +639,6 @@ def _minimax(board: np.ndarray, depth: int, alpha: float, beta: float,
                 break
         return best
 
-# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Dynamic depth — pieces left × time left, working together
 # ---------------------------------------------------------------------------
@@ -709,8 +710,9 @@ def get_best_move(board: np.ndarray, playing_white: bool = True
 
     Returns
     -------
-    Move string in the format '<piece_id>:<src_cell>-><dst_cell>', or
-    None if no legal moves are available.
+    Move string in the format '<piece_id>:<src_cell>-><dst_cell>' for normal moves,
+    or '<piece_id>:<src_cell>-><dst_cell>=<promo_piece_id>' for promotions.
+    Returns None if no legal moves are available.
     """
     global _move_number, _killer_moves
     _killer_moves = [[None, None] for _ in range(20)]
@@ -722,7 +724,7 @@ def get_best_move(board: np.ndarray, playing_white: bool = True
     # Record this position for repetition tracking
     _record_position(board)
 
-    # Dynamic depth based on piece count
+    # Dynamic depth based on piece count and time remaining
     depth = _get_depth(board)
 
     # Temperature for move selection (decreases as game goes on)
@@ -803,8 +805,10 @@ def get_best_move(board: np.ndarray, playing_white: bool = True
 
     _move_number += 1
 
-    # format_move takes 5 args (strip promo from tuple)
-    return format_move(chosen[0], chosen[1], chosen[2], chosen[3], chosen[4])
+    # FIX: Pass chosen[5] (promo_piece) to format_move so promotion suffix is included
+    # chosen = (piece, src_row, src_col, dst_row, dst_col, promo_piece)
+    return format_move(chosen[0], chosen[1], chosen[2],
+                       chosen[3], chosen[4], chosen[5])
 
 
 # ---------------------------------------------------------------------------
@@ -813,7 +817,7 @@ def get_best_move(board: np.ndarray, playing_white: bool = True
 
 if __name__ == "__main__":
     # Example: standard-ish starting position on a 6x6 board
-    # White pieces on rows 4-5, Black pieces on rows 0-1
+    # White pieces on rows 0-1, Black pieces on rows 4-5
     initial_board = np.array([
         [ 2,  3,  4,  5,  3,  2],   # Row 1 (A1–F1) — White back rank
         [ 1,  1,  1,  1,  1,  1],   # Row 2         — White pawns
@@ -826,3 +830,19 @@ if __name__ == "__main__":
     print("Board:\n", initial_board)
     move = get_best_move(initial_board, playing_white=True)
     print("Best move for White:", move)
+
+    # Promotion smoke-test:
+    # White pawn one step from promotion
+    promo_test_board = np.array([
+        [ 0,  0,  0,  5,  0,  0],
+        [ 0,  0,  0,  0,  0,  0],
+        [ 0,  0,  0,  0,  0,  0],
+        [ 0,  0,  0,  0,  0,  0],
+        [ 1,  0,  0,  0,  0,  0],   # White pawn on A5 — one step from A6
+        [ 0,  0,  0, 10,  0,  0],   # Black king on D6
+    ], dtype=int)
+
+    print("\nPromotion test board:\n", promo_test_board)
+    reset_game_state()
+    promo_move = get_best_move(promo_test_board, playing_white=True)
+    print("Promotion move (expect '1:A5->A6=4' or similar):", promo_move)
