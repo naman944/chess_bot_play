@@ -491,9 +491,6 @@ def evaluate(board: np.ndarray) -> float:
     if w_bishop_cnt >= 2: score += 40
     if b_bishop_cnt >= 2: score -= 40
 
-    # 10. Check bonus
-    if is_in_check(board, True):  score -= 90
-    if is_in_check(board, False): score += 90
 
     return score
 
@@ -603,41 +600,46 @@ def _quiescence(board: np.ndarray, alpha: float, beta: float,
 # Minimax + Alpha-Beta
 # ---------------------------------------------------------------------------
 
-def _minimax(board: np.ndarray, depth: int, alpha: float, beta: float,
-             maximizing: bool) -> float:
+_tt = {}  # key: board.tobytes() → (score, depth, flag)  flag: 'exact','lower','upper'
+
+def _minimax(board, depth, alpha, beta, maximizing):
+    key = board.tobytes()
+    if key in _tt:
+        entry = _tt[key]
+        if entry['depth'] >= depth:
+            if entry['flag'] == 'exact': return entry['score']
+            if entry['flag'] == 'lower': alpha = max(alpha, entry['score'])
+            if entry['flag'] == 'upper': beta  = min(beta,  entry['score'])
+            if alpha >= beta: return entry['score']
+
     if depth == 0:
         return _quiescence(board, alpha, beta, maximizing)
 
     moves = get_all_moves(board, maximizing)
-    if not moves:
-        if is_in_check(board, maximizing):
-            return (-99999 - depth) if maximizing else (99999 + depth)
-        return 0   # stalemate
-
-    moves = _order_moves(board, moves, depth)
-
+    orig_alpha = alpha
     if maximizing:
         best = float('-inf')
-        for move in moves:
-            score = _minimax(apply_move(board, *move),
-                             depth - 1, alpha, beta, False)
-            best  = max(best, score)
-            alpha = max(alpha, score)
-            if beta <= alpha:
-                _update_killer(move, depth)
+        for move in _order_moves(board, moves, depth):
+            score = _minimax(apply_move(board, *move), depth - 1, alpha, beta, False)
+            best = max(best, score)
+            alpha = max(alpha, best)
+            if alpha >= beta:
                 break
-        return best
     else:
         best = float('inf')
-        for move in moves:
-            score = _minimax(apply_move(board, *move),
-                             depth - 1, alpha, beta, True)
+        for move in _order_moves(board, moves, depth):
+            score = _minimax(apply_move(board, *move), depth - 1, alpha, beta, True)
             best = min(best, score)
-            beta = min(beta, score)
+            beta = min(beta, best)
             if beta <= alpha:
-                _update_killer(move, depth)
                 break
-        return best
+
+    # Store result
+    flag = 'exact'
+    if best <= orig_alpha: flag = 'upper'
+    elif best >= beta:     flag = 'lower'
+    _tt[key] = {'score': best, 'depth': depth, 'flag': flag}
+    return best
 
 # ---------------------------------------------------------------------------
 # Dynamic depth — pieces left × time left, working together
@@ -753,7 +755,7 @@ def get_best_move(board: np.ndarray, playing_white: bool = True
 
             # Repetition penalty — discourage revisiting positions
             rep_penalty = _repetition_penalty(new_board)
-            score = score - rep_penalty if playing_white else score + rep_penalty
+            score = score - rep_penalty
 
             # Tiny noise to break ties and prevent oscillation
             score += (hash(move) % 31 - 15) * 0.1
@@ -786,7 +788,7 @@ def get_best_move(board: np.ndarray, playing_white: bool = True
     THRESHOLD = 50
     best_score  = max(s for _, s in moves_with_scores)
     candidates  = [(m, s) for m, s in moves_with_scores
-                   if best_score - s <= THRESHOLD]
+                   if s == best_score or best_score - s <= THRESHOLD]
 
     if temperature < 0.01 or len(candidates) == 1:
         # Deterministic — pick best
